@@ -1,0 +1,299 @@
+az login --tenant --use-device-code
+az account list -o table
+
+# Create a new resource group after initialising a unique identifier
+# UNIQUEID=$(openssl rand -hex 3)
+UNIQUEID=f2a90d
+APPNAME=petclinic
+RESOURCE_GROUP=rg-$APPNAME-$UNIQUEID
+LOCATION=eastus
+az group create -g $RESOURCE_GROUP -l $LOCATION
+
+#Create a new Azure Container Registry (ACR) instance.
+MYACR=acr$APPNAME$UNIQUEID
+az acr create \
+    -n $MYACR \
+    -g $RESOURCE_GROUP \
+    --sku Basic
+
+#MYACR=acr$APPNAME$UNIQUEID
+az acr create \
+    -n $MYACR \
+    -g $RESOURCE_GROUP \
+    --sku Basic
+
+#Create a new Azure Container Registry (ACR) instance.
+VIRTUAL_NETWORK_NAME=vnet-$APPNAME-$UNIQUEID
+az network vnet create \
+    --resource-group $RESOURCE_GROUP \
+    --name $VIRTUAL_NETWORK_NAME \
+    --location $LOCATION \
+    --address-prefix 10.1.0.0/16
+
+AKS_SUBNET_CIDR=10.1.0.0/24
+az network vnet subnet create \
+    --resource-group $RESOURCE_GROUP \
+    --vnet-name $VIRTUAL_NETWORK_NAME \
+    --address-prefixes $AKS_SUBNET_CIDR \
+    --name aks-subnet
+
+#Retrieve the subnet identifier
+SUBNET_ID=$(az network vnet subnet show --resource-group $RESOURCE_GROUP --vnet-name $VIRTUAL_NETWORK_NAME --name aks-subnet --query id -o tsv)
+
+#Create AKS Cluster
+AKSCLUSTER=aks-$APPNAME-$UNIQUEID
+az aks create \
+    -n $AKSCLUSTER \
+    -g $RESOURCE_GROUP \
+    --location $LOCATION \
+    --generate-ssh-keys \
+    --attach-acr $MYACR \
+    --vnet-subnet-id $SUBNET_ID
+
+#Create a PAT - ...
+#Test PAT
+curl -XGET -H 'authorization: token github_pat_....' 'https://api.github.com/repos/martinabrle/spring-petclinic-microservices-config'
+
+#Clone the repo and run this command:
+cd spring-petclinic-microservices-config
+curl -o api-gateway.yml https://raw.githubusercontent.com/Azure-Samples/java-microservices-aks-lab/main/config/api-gateway.yml
+curl -o application.yml https://raw.githubusercontent.com/Azure-Samples/java-microservices-aks-lab/main/config/application.yml
+curl -o customers-service.yml https://raw.githubusercontent.com/Azure-Samples/java-microservices-aks-lab/main/config/customers-service.yml
+curl -o discovery-server.yml https://raw.githubusercontent.com/Azure-Samples/java-microservices-aks-lab/main/config/discovery-server.yml
+curl -o tracing-server.yml https://raw.githubusercontent.com/Azure-Samples/java-microservices-aks-lab/main/config/tracing-server.yml
+curl -o vets-service.yml https://raw.githubusercontent.com/Azure-Samples/java-microservices-aks-lab/main/config/vets-service.yml
+curl -o visits-service.yml https://raw.githubusercontent.com/Azure-Samples/java-microservices-aks-lab/main/config/visits-service.yml
+
+#Push to github
+
+#In this repo, set URI (without .git), username and password (PAT) for config server's application.yml
+
+#Create an instance of MySQL Flexible Server
+MYSQL_SERVER_NAME=mysql-$APPNAME-$UNIQUEID
+MYSQL_ADMIN_USERNAME=myadmin
+MYSQL_ADMIN_PASSWORD=WLDZ2eNf9aksZLfjY9nGD5EXKV7AQw==
+DATABASE_NAME=petclinic
+
+az mysql flexible-server create \
+    --admin-user myadmin \
+    --admin-password ${MYSQL_ADMIN_PASSWORD} \
+    --name ${MYSQL_SERVER_NAME} \
+    --resource-group ${RESOURCE_GROUP}
+
+#Create a database
+az mysql flexible-server db create \
+     --server-name $MYSQL_SERVER_NAME \
+     --resource-group $RESOURCE_GROUP \
+     -d $DATABASE_NAME
+
+#Replace config repo's application.yml with this one: https://github.com/Azure-Samples/java-microservices-aks-lab/blob/main/docs/02_lab_migrate/0203_application.yml and fix params
+#uses java17
+
+VERSION=3.0.2
+#in Src DIR runn 
+mvn clean package -DskipTests
+
+mkdir -p staging-acr
+cd staging-acr
+
+cp ../spring-petclinic-api-gateway/target/spring-petclinic-api-gateway-$VERSION.jar spring-petclinic-api-gateway-$VERSION.jar
+cp ../spring-petclinic-admin-server/target/spring-petclinic-admin-server-$VERSION.jar spring-petclinic-admin-server-$VERSION.jar
+cp ../spring-petclinic-customers-service/target/spring-petclinic-customers-service-$VERSION.jar spring-petclinic-customers-service-$VERSION.jar
+cp ../spring-petclinic-visits-service/target/spring-petclinic-visits-service-$VERSION.jar spring-petclinic-visits-service-$VERSION.jar
+cp ../spring-petclinic-vets-service/target/spring-petclinic-vets-service-$VERSION.jar spring-petclinic-vets-service-$VERSION.jar
+cp ../spring-petclinic-config-server/target/spring-petclinic-config-server-$VERSION.jar spring-petclinic-config-server-$VERSION.jar
+cp ../spring-petclinic-discovery-server/target/spring-petclinic-discovery-server-$VERSION.jar spring-petclinic-discovery-server-$VERSION.jar
+
+az acr login -n $MYACR
+
+#Create the first container
+docker build -t $MYACR.azurecr.io/spring-petclinic-api-gateway:$VERSION \
+    --build-arg ARTIFACT_NAME=spring-petclinic-api-gateway-$VERSION.jar \
+    --build-arg APP_PORT=8080 \
+    .
+
+docker image list
+
+docker push $MYACR.azurecr.io/spring-petclinic-api-gateway:$VERSION
+
+az acr repository list \
+   -n $MYACR
+
+docker build -t $MYACR.azurecr.io/spring-petclinic-admin-server:$VERSION \
+    --build-arg ARTIFACT_NAME=spring-petclinic-admin-server-$VERSION.jar \
+    --build-arg APP_PORT=8080 \
+    .
+
+docker push $MYACR.azurecr.io/spring-petclinic-admin-server:$VERSION
+
+docker build -t $MYACR.azurecr.io/spring-petclinic-customers-service:$VERSION \
+    --build-arg ARTIFACT_NAME=spring-petclinic-customers-service-$VERSION.jar \
+    --build-arg APP_PORT=8080 \
+    .
+
+docker push $MYACR.azurecr.io/spring-petclinic-customers-service:$VERSION
+
+docker build -t $MYACR.azurecr.io/spring-petclinic-visits-service:$VERSION \
+    --build-arg ARTIFACT_NAME=spring-petclinic-visits-service-$VERSION.jar \
+    --build-arg APP_PORT=8080 \
+    --build-arg AI_JAR=ai.jar \
+    .
+
+docker push $MYACR.azurecr.io/spring-petclinic-visits-service:$VERSION
+
+docker build -t $MYACR.azurecr.io/spring-petclinic-vets-service:$VERSION \
+    --build-arg ARTIFACT_NAME=spring-petclinic-vets-service-$VERSION.jar \
+    --build-arg APP_PORT=8080 \
+    .
+docker push $MYACR.azurecr.io/spring-petclinic-vets-service:$VERSION
+
+docker build -t $MYACR.azurecr.io/spring-petclinic-config-server:$VERSION \
+    --build-arg ARTIFACT_NAME=spring-petclinic-config-server-$VERSION.jar \
+    --build-arg APP_PORT=8888 \
+    .
+
+docker push $MYACR.azurecr.io/spring-petclinic-config-server:$VERSION
+
+docker build -t $MYACR.azurecr.io/spring-petclinic-discovery-server:$VERSION \
+    --build-arg ARTIFACT_NAME=spring-petclinic-discovery-server-$VERSION.jar \
+    --build-arg APP_PORT=8761 \
+    .
+
+docker push $MYACR.azurecr.io/spring-petclinic-discovery-server:$VERSION
+
+az acr repository show-tags \
+    -n $MYACR \
+    --repository spring-petclinic-customers-service
+
+..... deploy stuff ...
+WORKSPACE=la-$APPNAME-$UNIQUEID
+az monitor log-analytics workspace create \
+    --resource-group $RESOURCE_GROUP \
+    --workspace-name $WORKSPACE
+
+WORKSPACEID=$(az monitor log-analytics workspace show -n $WORKSPACE -g $RESOURCE_GROUP --query id -o tsv)
+
+az aks enable-addons \
+    -a monitoring \
+    -n $AKSCLUSTER \
+    -g $RESOURCE_GROUP \
+    --workspace-resource-id $WORKSPACEID
+
+kubectl get ds ama-logs --namespace=kube-system
+
+AINAME=ai-$APPNAME-$UNIQUEID
+az extension add -n application-insights
+az monitor app-insights component create \
+    --app $AINAME \
+    --location $LOCATION \
+    --kind web \
+    -g $RESOURCE_GROUP \
+    --workspace $WORKSPACEID
+
+cd ../staging-acr
+
+wget https://github.com/microsoft/ApplicationInsights-Java/releases/download/3.4.12/applicationinsights-agent-3.4.12.jar
+cp applicationinsights-agent-3.4.12.jar ai.jar
+
+cp ../spring-petclinic-api-gateway/target/spring-petclinic-api-gateway-$VERSION.jar spring-petclinic-api-gateway-$VERSION.jar
+cp ../spring-petclinic-admin-server/target/spring-petclinic-admin-server-$VERSION.jar spring-petclinic-admin-server-$VERSION.jar
+cp ../spring-petclinic-customers-service/target/spring-petclinic-customers-service-$VERSION.jar spring-petclinic-customers-service-$VERSION.jar
+cp ../spring-petclinic-visits-service/target/spring-petclinic-visits-service-$VERSION.jar spring-petclinic-visits-service-$VERSION.jar
+cp ../spring-petclinic-vets-service/target/spring-petclinic-vets-service-$VERSION.jar spring-petclinic-vets-service-$VERSION.jar
+cp ../spring-petclinic-config-server/target/spring-petclinic-config-server-$VERSION.jar spring-petclinic-config-server-$VERSION.jar
+cp ../spring-petclinic-discovery-server/target/spring-petclinic-discovery-server-$VERSION.jar spring-petclinic-discovery-server-$VERSION.jar
+
+
+docker build -t $MYACR.azurecr.io/spring-petclinic-api-gateway:$VERSION \
+    --build-arg ARTIFACT_NAME=spring-petclinic-api-gateway-$VERSION.jar \
+    --build-arg APP_PORT=8080 \
+    --build-arg AI_JAR=ai.jar \
+    .
+
+docker push $MYACR.azurecr.io/spring-petclinic-api-gateway:$VERSION
+...update and push all containers...
+
+AI_CONNECTIONSTRING=$(az monitor app-insights component show --app $AINAME -g $RESOURCE_GROUP --query connectionString)
+
+#re-generate YAML files
+
+KEYVAULT_NAME=kv-$APPNAME-$UNIQUEID
+az keyvault create \
+    --name $KEYVAULT_NAME \
+    --resource-group $RESOURCE_GROUP \
+    --location $LOCATION \
+    --sku standard
+
+GIT_PAT=".."
+az keyvault secret set \
+    --name GIT-PAT \
+    --value $GIT_PAT \
+    --vault-name $KEYVAULT_NAME
+
+az aks update --enable-oidc-issuer --enable-workload-identity --name $AKSCLUSTER --resource-group $RESOURCE_GROUP
+
+export AKS_OIDC_ISSUER="$(az aks show -n $AKSCLUSTER -g $RESOURCE_GROUP --query "oidcIssuerProfile.issuerUrl" -otsv)"
+echo $AKS_OIDC_ISSUER
+
+USER_ASSIGNED_IDENTITY_NAME=uid-$APPNAME-$UNIQUEID
+
+az identity create --name "${USER_ASSIGNED_IDENTITY_NAME}" --resource-group "${RESOURCE_GROUP}" --location "${LOCATION}"
+
+az identity show --resource-group "${RESOURCE_GROUP}" --name "${USER_ASSIGNED_IDENTITY_NAME}"
+USER_ASSIGNED_CLIENT_ID="$(az identity show --resource-group "${RESOURCE_GROUP}" --name "${USER_ASSIGNED_IDENTITY_NAME}" --query 'clientId' -otsv)"
+echo $USER_ASSIGNED_CLIENT_ID
+
+az keyvault set-policy -g $RESOURCE_GROUP -n $KEYVAULT_NAME --key-permissions get --spn $USER_ASSIGNED_CLIENT_ID
+az keyvault set-policy -g $RESOURCE_GROUP -n $KEYVAULT_NAME --secret-permissions get --spn $USER_ASSIGNED_CLIENT_ID
+az keyvault set-policy -g $RESOURCE_GROUP -n $KEYVAULT_NAME --certificate-permissions get --spn $USER_ASSIGNED_CLIENT_ID
+
+export SERVICE_ACCOUNT_NAME="workload-identity-sa"
+
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    azure.workload.identity/client-id: "${USER_ASSIGNED_CLIENT_ID}"
+  name: "${SERVICE_ACCOUNT_NAME}"
+  namespace: "${NAMESPACE}"
+EOF
+
+export FEDERATED_IDENTITY_CREDENTIAL_NAME=fedid-$APPNAME-$UNIQUEID
+
+az identity federated-credential create --name ${FEDERATED_IDENTITY_CREDENTIAL_NAME} --identity-name "${USER_ASSIGNED_IDENTITY_NAME}" --resource-group "${RESOURCE_GROUP}" --issuer "${AKS_OIDC_ISSUER}" --subject system:serviceaccount:"${NAMESPACE}":"${SERVICE_ACCOUNT_NAME}" --audience api://AzureADTokenExchange
+
+az aks enable-addons --addons azure-keyvault-secrets-provider --name $AKSCLUSTER --resource-group $RESOURCE_GROUP
+
+kubectl get pods -n kube-system
+
+export ADTENANT=$(az account show --query tenantId --output tsv)
+... deploy secrets-store-csi yaml (Secret Provider Class)
+
+curl -o spring-petclinic-config-server.yml https://raw.githubusercontent.com/Azure-Samples/java-microservices-aks-lab/main/docs/04_lab_secrets/spring-petclinic-config-server.yml
+
+IMAGE=${MYACR}.azurecr.io/spring-petclinic-config-server:$VERSION
+sed -i "s|#image#|$IMAGE|g" spring-petclinic-config-server.yml
+
+export DB_ADMIN_USER_ASSIGNED_IDENTITY_NAME=uid-dbadmin-$APPNAME-$UNIQUEID
+az identity create --name "${DB_ADMIN_USER_ASSIGNED_IDENTITY_NAME}" --resource-group "${RESOURCE_GROUP}" --location "${LOCATION}"
+
+az mysql flexible-server identity assign \
+    --resource-group $RESOURCE_GROUP \
+    --server-name $MYSQL_SERVER_NAME \
+    --identity $DB_ADMIN_USER_ASSIGNED_IDENTITY_NAME
+
+export CURRENT_USER=$(az account show --query user.name --output tsv)
+echo $CURRENT_USER
+export CURRENT_USER_OBJECTID=$(az ad signed-in-user show --query id --output tsv)
+echo $CURRENT_USER_OBJECTID
+
+export IDENTITY_LOGIN_NAME="mysql_conn"
+
+cat <<EOF >createuser.sql
+SET aad_auth_validate_oids_in_tenant = OFF;
+DROP USER IF EXISTS '${IDENTITY_LOGIN_NAME}'@'%';
+CREATE AADUSER '${IDENTITY_LOGIN_NAME}' IDENTIFIED BY '${USER_ASSIGNED_CLIENT_ID}';
+GRANT ALL PRIVILEGES ON ${DATABASE_NAME}.* TO '${IDENTITY_LOGIN_NAME}'@'%';
+FLUSH privileges;
+EOF
